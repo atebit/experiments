@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>3D Magnetic Fractal Cones (Multiple Orbit Points)</title>
+  <style>
+    body { margin: 0; overflow: hidden; background:#F6F6FA; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import * as THREE        from './three.module.js';
+    import { SimplexNoise }  from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // — Scene, Camera, Renderer —
+    const scene    = new THREE.Scene();
+    scene.background = new THREE.Color(0x202020);
+    // const camera   = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+    const camera   = new THREE.PerspectiveCamera(80, innerWidth/innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 5);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // — Lights —
+    [[0,0,5],[0,0,-5],[5,0,0],[-5,0,0],[0,5,0],[0,-5,0]]
+      .forEach(p => {
+        const L = new THREE.DirectionalLight(0xffffff, 0.8);
+        L.position.set(...p);
+        scene.add(L);
+      });
+    scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+    // — Sphere + Backup —
+    const radius = 1, detail = 128;
+    const geo    = new THREE.SphereGeometry(radius, detail, detail);
+    const basePos= Float32Array.from(geo.attributes.position.array);
+    const mat    = new THREE.MeshPhysicalMaterial({
+      color:0x000000, metalness:0.9, roughness:0.1,
+      clearcoat:1, clearcoatRoughness:0,
+      // wireframe:true
+    });
+    const sphere = new THREE.Mesh(geo, mat);
+    scene.add(sphere);
+
+    // — Noise —
+    const noise     = new SimplexNoise();
+    const noiseFreq = 1.5, noiseAmp = 0.15;
+    let   time      = 0;
+
+    // — Params (tuned values) —
+    const baseThreshold = 0.8;
+    const scale         = 2.5;
+    const strengthDecay = 0.6;
+    const falloffPower  = 2;
+    const influenceDist = 2000;
+    const baseAmp       = 0.8;
+    const ringCounts    = [0, 8, 16];
+
+    // — Precompute thresholds —
+    const primaryThreshold   = baseThreshold * scale;
+    const secondaryThreshold = primaryThreshold * scale;
+    const tertiaryThreshold  = secondaryThreshold * scale;
+
+    // — Prepare multiple orbit points & dots —
+    const orbitPoints = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    const dotMats = [0xff0000, 0x00ff00, 0x0000ff];
+
+    // create dots once
+    orbitPoints.forEach((_, i) => {
+      const dotGeom = new THREE.SphereGeometry(0.03, 8, 8);
+      const dotMat  = new THREE.MeshBasicMaterial({ color: dotMats[i] });
+      const dotMesh = new THREE.Mesh(dotGeom, dotMat);
+      dotMesh.name  = `magDot${i}`;
+      scene.add(dotMesh);
+    });
+
+    // — OrbitControls —
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    function animate(){
+      requestAnimationFrame(animate);
+      time += 0.005;
+
+      // — Compute each orbiting point with varied noise/time —
+      orbitPoints.forEach((pt, i) => {
+        const radiusVar = 3 + Math.sin(time * (0.3 + i*0.1)) * 0.5;
+        const theta = time * (0.7 + i*0.2) + noise.noise3d(time, i, 0) * 0.5;
+        const phi   = time * (0.5 + i*0.15) + noise.noise3d(i, time, 0) * 0.3;
+        pt.set(
+          radiusVar * Math.cos(theta) * Math.sin(phi),
+          radiusVar * Math.sin(theta) * Math.sin(phi),
+          radiusVar * Math.cos(phi)
+        );
+        // update dot position
+        scene.getObjectByName(`magDot${i}`).position.copy(pt);
+      });
+
+      // — Deform each vertex toward all orbitPoints —
+      const pos = sphere.geometry.attributes.position;
+      for(let idx = 0; idx < pos.count; idx++){
+        const ix = 3*idx, iy = ix+1, iz = ix+2;
+        const ox = basePos[ix], oy = basePos[iy], oz = basePos[iz];
+
+        // base noise radius
+        const n = noise.noise4d(ox*noiseFreq, oy*noiseFreq, oz*noiseFreq, time);
+        let r   = radius + n*noiseAmp;
+
+        // world-space vertex
+        const xW = ox*r, yW = oy*r, zW = oz*r;
+
+        // accumulate pull from each point
+        orbitPoints.forEach((pt, i) => {
+          const d = Math.hypot(xW-pt.x, yW-pt.y, zW-pt.z);
+          if(d < primaryThreshold) {
+            const f = Math.pow(1 - d/primaryThreshold, falloffPower);
+            r += baseAmp * f;
+          } else if(d < secondaryThreshold) {
+            const inner = primaryThreshold, outer = secondaryThreshold;
+            const fRad  = 1 - ((d-inner)/(outer-inner));
+            // angular modulation
+            const dirVec = pt.clone().normalize();
+            const local  = new THREE.Vector3(xW-pt.x, yW-pt.y, zW-pt.z)
+              .sub(dirVec.clone().multiplyScalar(xW*dirVec.x+yW*dirVec.y+zW*dirVec.z));
+            const orthA = new THREE.Vector3().crossVectors(dirVec, new THREE.Vector3(0,1,0)).normalize();
+            const orthB = new THREE.Vector3().crossVectors(dirVec, orthA).normalize();
+            const ax = local.dot(orthA), ay = local.dot(orthB);
+            const angle = Math.atan2(ay, ax);
+            const spikeF = Math.max(Math.cos(angle*ringCounts[1]),0)**4;
+            r += baseAmp * Math.pow(strengthDecay,1) * fRad * spikeF;
+          } else if(d < tertiaryThreshold) {
+            const inner = secondaryThreshold, outer = tertiaryThreshold;
+            const fRad  = 1 - ((d-inner)/(outer-inner));
+            const dirVec = pt.clone().normalize();
+            const local  = new THREE.Vector3(xW-pt.x, yW-pt.y, zW-pt.z)
+              .sub(dirVec.clone().multiplyScalar(xW*dirVec.x+yW*dirVec.y+zW*dirVec.z));
+            const orthA = new THREE.Vector3().crossVectors(dirVec, new THREE.Vector3(0,1,0)).normalize();
+            const orthB = new THREE.Vector3().crossVectors(dirVec, orthA).normalize();
+            const ax = local.dot(orthA), ay = local.dot(orthB);
+            const angle = Math.atan2(ay, ax);
+            const spikeF = Math.max(Math.cos(angle*ringCounts[2]),0)**4;
+            r += baseAmp * Math.pow(strengthDecay,2) * fRad * spikeF;
+          }
+        });
+
+        // write back
+        pos.array[ix] = ox * r;
+        pos.array[iy] = oy * r;
+        pos.array[iz] = oz * r;
+      }
+
+      pos.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // — Resize —
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>

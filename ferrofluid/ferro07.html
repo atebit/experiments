@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Wireframe + Full-Space Mouse Pull</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from './three.module.js';
+    import { SimplexNoise } from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // Scene / Camera / Renderer
+    const scene    = new THREE.Scene();
+    scene.background = new THREE.Color(0xF7F7FB);
+    const camera   = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 5);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Lights (six directions + ambient)
+    [[0,0,5],[0,0,-5],[5,0,0],[-5,0,0],[0,5,0],[0,-5,0]]
+      .forEach(([x,y,z]) => {
+        const L = new THREE.DirectionalLight(0xffffff, 0.8);
+        L.position.set(x,y,z);
+        scene.add(L);
+      });
+    scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+    // Sphere + base positions backup
+    const radius = 1, detail = 128;
+    const geo    = new THREE.SphereGeometry(radius, detail, detail);
+    const basePos = Float32Array.from(geo.attributes.position.array);
+
+    const mat = new THREE.MeshPhysicalMaterial({
+      color: 0x000000,
+      metalness: 0.9,
+      roughness: 0.1,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.0,
+      wireframe: true
+    });
+
+    const sphere = new THREE.Mesh(geo, mat);
+    scene.add(sphere);
+
+    // Noise setup
+    const noise     = new SimplexNoise();
+    const noiseFreq = 1.5;
+    const noiseAmp  = 0.15;
+    let   t         = 0;
+
+    // Mouse & raycaster
+    const raycaster = new THREE.Raycaster();
+    const mouse     = new THREE.Vector2();
+    window.addEventListener('mousemove', e => {
+      mouse.x = (e.clientX / innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+    });
+
+    // Pull params
+    const mouseAmp       = 0.5;   // max bump
+    const mouseThreshold = 0.5;   // how close to ray to get pulled
+    const falloffPower   = 4;     // sharpness of cone
+    const influenceDist  = 5;     // max distance along ray to consider
+
+    // Controls
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    function animate() {
+      requestAnimationFrame(animate);
+      t += 0.005;
+
+      // update the ray from camera through mouse
+      raycaster.setFromCamera(mouse, camera);
+      const rayOrigin = raycaster.ray.origin;
+      const rayDir    = raycaster.ray.direction;
+
+      const posAttr = sphere.geometry.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) {
+        const ix = 3*i, iy = ix+1, iz = ix+2;
+        const ox = basePos[ix], oy = basePos[iy], oz = basePos[iz];
+
+        // 1) noise-based radius
+        const n      = noise.noise4d(ox*noiseFreq, oy*noiseFreq, oz*noiseFreq, t);
+        let   rBase  = radius + n * noiseAmp;
+
+        // 2) world-space vertex
+        const xW = ox * rBase, yW = oy * rBase, zW = oz * rBase;
+
+        // 3) project (xW,yW,zW) onto the ray to find closest point
+        const toVert = new THREE.Vector3(xW - rayOrigin.x, yW - rayOrigin.y, zW - rayOrigin.z);
+        let   tProj  = toVert.dot(rayDir);
+        // clamp projection so it doesn’t pull from infinity
+        tProj = THREE.MathUtils.clamp(tProj, 0, influenceDist);
+        const closest = new THREE.Vector3()
+          .copy(rayDir)
+          .multiplyScalar(tProj)
+          .add(rayOrigin);
+
+        // 4) distance to ray
+        const dist = closest.distanceTo(new THREE.Vector3(xW, yW, zW));
+        if (dist < mouseThreshold) {
+          let f = 1 - (dist / mouseThreshold);
+          f = Math.pow(f, falloffPower);
+          rBase += mouseAmp * f;
+        }
+
+        // 5) write final
+        posAttr.array[ix] = ox * rBase;
+        posAttr.array[iy] = oy * rBase;
+        posAttr.array[iz] = oz * rBase;
+      }
+
+      posAttr.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // handle resize
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>

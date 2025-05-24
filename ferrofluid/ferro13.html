@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>3D Magnetic Fractal Cones (Cones Toward Camera)</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import * as THREE        from './three.module.js';
+    import { SimplexNoise }  from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // — Scene / Camera / Renderer —
+    const scene    = new THREE.Scene();
+    scene.background = new THREE.Color(0xF7F7FB);
+    const camera   = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 5);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // — Lights (six directions + ambient) —
+    [[0,0,5],[0,0,-5],[5,0,0],[-5,0,0],[0,5,0],[0,-5,0]]
+      .forEach(([x,y,z]) => {
+        const L = new THREE.DirectionalLight(0xffffff, 0.8);
+        L.position.set(x, y, z);
+        scene.add(L);
+      });
+    scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+    // — Glossy Sphere + Base Position Backup —
+    const radius  = 1, detail = 128;
+    const geometry = new THREE.SphereGeometry(radius, detail, detail);
+    const basePos = Float32Array.from(geometry.attributes.position.array);
+    const material = new THREE.MeshPhysicalMaterial({
+      color: 0x000000,
+      metalness: 0.9,
+      roughness: 0.1,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.0,
+      wireframe: true    // keep wireframe on
+    });
+    const sphere = new THREE.Mesh(geometry, material);
+    scene.add(sphere);
+
+    // — Noise Setup —
+    const noise     = new SimplexNoise();
+    const noiseFreq = 1.5;
+    const noiseAmp  = 0.15;
+    let   time      = 0;
+
+    // — Mouse + Raycaster —
+    const raycaster = new THREE.Raycaster();
+    const mouse     = new THREE.Vector2();
+    window.addEventListener('mousemove', e => {
+      mouse.x = (e.clientX / innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+    });
+
+    // — Fractal-cone parameters (your tuned values) —
+    const baseThreshold = 0.2;     // inner ring radius
+    const scale         = 3;       // ring spacing multiplier
+    const strengthDecay = 0.6;     // amplitude decay per ring
+    const falloffPower  = 2;       // how smooth/sharp the taper is
+    const influenceDist = 1000;     // how far out along the ray to project
+    const baseMouseAmp  = 0.8;     // overall spike height
+
+    // Precompute thresholds
+    const thresholds = [
+      baseThreshold,
+      baseThreshold * scale,
+      baseThreshold * scale * scale
+    ];
+
+    // — OrbitControls for inspection —
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    function animate() {
+      requestAnimationFrame(animate);
+      time += 0.005;
+
+      // 1) update the mouse ray
+      raycaster.setFromCamera(mouse, camera);
+      const rayOrigin = raycaster.ray.origin;
+      const rayDir    = raycaster.ray.direction;
+
+      // 2) rebuild vertices
+      const posAttr = sphere.geometry.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) {
+        const ix = 3*i, iy = ix+1, iz = ix+2;
+        const ox = basePos[ix], oy = basePos[iy], oz = basePos[iz];
+
+        // a) base Perlin noise
+        const n     = noise.noise4d(ox*noiseFreq, oy*noiseFreq, oz*noiseFreq, time);
+        let   rBase = radius + n * noiseAmp;
+
+        // b) compute world-space vert after noise
+        const xW = ox * rBase, yW = oy * rBase, zW = oz * rBase;
+
+        // c) closest point on the mouse ray
+        const toVert = new THREE.Vector3(xW - rayOrigin.x,
+                                         yW - rayOrigin.y,
+                                         zW - rayOrigin.z);
+        let tProj = toVert.dot(rayDir);
+        tProj = THREE.MathUtils.clamp(tProj, 0, influenceDist);
+        const closest = new THREE.Vector3()
+          .copy(rayDir)
+          .multiplyScalar(tProj)
+          .add(rayOrigin);
+
+        // d) distance from vertex to that ray‐axis
+        const distToAxis = closest.distanceTo(new THREE.Vector3(xW, yW, zW));
+
+        // e) **only affect the side facing the camera**  
+        //    normals on the near hemisphere dot(camera→sphere) > 0
+        //    camera→sphere vector is simply rayDir.negate()
+        const viewDot = ox * (-rayDir.x)
+                      + oy * (-rayDir.y)
+                      + oz * (-rayDir.z);
+        if (viewDot > 0) {
+          // f) concentric layers
+          for (let layer = 0; layer < 3; layer++) {
+            const thresh = thresholds[layer];
+            if (distToAxis < thresh) {
+              let f = 1 - (distToAxis / thresh);
+              f = Math.pow(f, falloffPower);
+              const amp = baseMouseAmp * Math.pow(strengthDecay, layer);
+              rBase += amp * f;
+              break;
+            }
+          }
+        }
+
+        // g) write final, pushing **outward** along the normal
+        posAttr.array[ix] = ox * rBase;
+        posAttr.array[iy] = oy * rBase;
+        posAttr.array[iz] = oz * rBase;
+      }
+
+      posAttr.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // — Handle Resize —
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>

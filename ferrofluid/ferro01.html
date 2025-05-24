@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Undulating Glossy Sphere</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from './three.module.js';
+    import { SimplexNoise } from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // ——— Scene, Camera, Renderer ———
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xF7F7FB);
+
+    const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // ——— Lights ———
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight.position.set(-1, 1, 2);
+    scene.add(dirLight);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+    // ——— Glossy Sphere + Backup of Base Positions ———
+    const radius = 1;
+    const detail = 128;
+    const sphereGeo = new THREE.SphereGeometry(radius, detail, detail);
+    // Keep a copy of original (flat) vertex positions
+    const originalPos = Float32Array.from(sphereGeo.attributes.position.array);
+
+    const sphereMat = new THREE.MeshPhysicalMaterial({
+      color: 0x000000,
+      metalness: 0.9,
+      roughness: 0.1,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.0
+    });
+    const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+    scene.add(sphere);
+
+    // ——— Noise Setup ———
+    const noise = new SimplexNoise();
+    const noiseFreq = 1.5;     // how “tightly” waves wrap around
+    const noiseAmp  = 0.15;    // max radius offset
+    let tOffset     = 0;       // time variable
+
+    // ——— Optional OrbitControls ———
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    // ——— Animation Loop ———
+    function animate() {
+      requestAnimationFrame(animate);
+
+      tOffset += 0.005; // controls wave speed
+
+      const posAttr = sphere.geometry.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) {
+        // read base position
+        const ix = i * 3, iy = ix + 1, iz = ix + 2;
+        const ox = originalPos[ix], oy = originalPos[iy], oz = originalPos[iz];
+
+        // compute noise value at this point + time
+        const n = noise.noise4d(
+          ox * noiseFreq,
+          oy * noiseFreq,
+          oz * noiseFreq,
+          tOffset
+        );
+
+        // new radius = base + amplitude × noise
+        const r = radius + n * noiseAmp;
+
+        // write displaced vertex back along its original direction
+        const len = Math.sqrt(ox*ox + oy*oy + oz*oz);
+        posAttr.array[ix] = (ox / len) * r;
+        posAttr.array[iy] = (oy / len) * r;
+        posAttr.array[iz] = (oz / len) * r;
+      }
+
+      // flag update + recompute normals for correct lighting
+      posAttr.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // ——— Handle Resize ———
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ferrofluid-Style Peaks</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from './three.module.js';
+    import { SimplexNoise } from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // — Scene & Camera & Renderer —
+    const scene    = new THREE.Scene();
+    scene.background = new THREE.Color(0xF7F7FB);
+    const camera   = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 5);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // — Lights (six-sided coverage) —
+    [[0,0,5],[0,0,-5],[5,0,0],[-5,0,0],[0,5,0],[0,-5,0]].forEach(([x,y,z])=>{
+      const L = new THREE.DirectionalLight(0xffffff, 0.8);
+      L.position.set(x,y,z);
+      scene.add(L);
+    });
+    scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+    // — Sphere + Backup Geometry —
+    const radius = 1, detail = 128;
+    const geo = new THREE.SphereGeometry(radius, detail, detail);
+    const basePos = Float32Array.from(geo.attributes.position.array);
+    const mat = new THREE.MeshPhysicalMaterial({
+      color: 0x000000, metalness: 0.9, roughness: 0.1,
+      clearcoat: 1.0, clearcoatRoughness: 0.0
+    });
+    const sphere = new THREE.Mesh(geo, mat);
+    scene.add(sphere);
+
+    // — Noise setup —
+    const noise     = new SimplexNoise();
+    const noiseFreq = 1.5;
+    const noiseAmp  = 0.15;
+    let t           = 0;
+
+    // — Mouse raycast setup —
+    const raycaster     = new THREE.Raycaster();
+    const mouse         = new THREE.Vector2();
+    let hitPointLocal   = null;
+    const mouseAmp      = 0.5;   // peak height
+    const mouseThreshold= 0.4;   // how far the effect spreads
+    const falloffPower  = 4;     // higher = pointier
+
+    window.addEventListener('mousemove', e => {
+      mouse.x = (e.clientX / innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+    });
+
+    // — Controls —
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    // — Animation Loop —
+    function animate() {
+      requestAnimationFrame(animate);
+      t += 0.005;
+
+      // 1) find the current hit point on the undulating mesh
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObject(sphere);
+      hitPointLocal = hits.length ? hits[0].point.clone() : null;
+
+      // 2) displace each vertex
+      const posAttr = sphere.geometry.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) {
+        const ix = 3*i, iy = ix+1, iz = ix+2;
+        const ox = basePos[ix], oy = basePos[iy], oz = basePos[iz];
+
+        // — noise only radius —
+        const n  = noise.noise4d(ox*noiseFreq, oy*noiseFreq, oz*noiseFreq, t);
+        let rNoise = radius + n*noiseAmp;
+
+        // compute the would-be world pos for threshold check
+        const xW = ox * rNoise, yW = oy * rNoise, zW = oz * rNoise;
+
+        // — mouse peak —
+        if (hitPointLocal) {
+          const dx = xW - hitPointLocal.x;
+          const dy = yW - hitPointLocal.y;
+          const dz = zW - hitPointLocal.z;
+          const dist = Math.hypot(dx, dy, dz);
+          if (dist < mouseThreshold) {
+            // linear falloff → sharpen with power
+            let f = 1 - (dist / mouseThreshold);
+            f = Math.pow(f, falloffPower);
+            rNoise += mouseAmp * f;
+          }
+        }
+
+        // write final displaced vertex along original normal
+        posAttr.array[ix] = ox * rNoise;
+        posAttr.array[iy] = oy * rNoise;
+        posAttr.array[iz] = oz * rNoise;
+      }
+      posAttr.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // — Handle Resize —
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>

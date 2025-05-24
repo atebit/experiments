@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>3D Magnetic Fractal Cones (Ringed Layers)</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import * as THREE        from './three.module.js';
+    import { SimplexNoise }  from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // — Scene, Camera, Renderer —
+    const scene    = new THREE.Scene();
+    scene.background = new THREE.Color(0xF7F7FB);
+    const camera   = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+    camera.position.set(0,0,5);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // — Lights —
+    [[0,0,5],[0,0,-5],[5,0,0],[-5,0,0],[0,5,0],[0,-5,0]]
+      .forEach(p=>{
+        const L = new THREE.DirectionalLight(0xffffff,0.8);
+        L.position.set(...p);
+        scene.add(L);
+      });
+    scene.add(new THREE.AmbientLight(0xffffff,0.2));
+
+    // — Sphere + Backup —
+    const radius = 1, detail = 128;
+    const geo    = new THREE.SphereGeometry(radius, detail, detail);
+    const basePos= Float32Array.from(geo.attributes.position.array);
+    const mat    = new THREE.MeshPhysicalMaterial({
+      color:0x000000, metalness:0.9, roughness:0.1,
+      clearcoat:1, clearcoatRoughness:0,
+      wireframe:true
+    });
+    const sphere = new THREE.Mesh(geo, mat);
+    scene.add(sphere);
+
+    // — Noise —
+    const noise     = new SimplexNoise();
+    const noiseFreq = 1.5, noiseAmp = 0.15;
+    let   time      = 0;
+
+    // — Mouse + Raycaster —
+    const raycaster = new THREE.Raycaster();
+    const mouse     = new THREE.Vector2();
+    window.addEventListener('mousemove', e => {
+      mouse.x = (e.clientX/innerWidth)*2 -1;
+      mouse.y = -(e.clientY/innerHeight)*2 +1;
+    });
+
+    // — Params (your tuned values) —
+    const baseThreshold = 0.2; // 0.2;
+    const scale         = 3;
+    const strengthDecay = 0.6;
+    const falloffPower  = 2; //2
+    const influenceDist = 1000;
+    const baseMouseAmp  = 0.8;
+
+    // Number of spikes in each ring
+    // const ringCounts = [ 0, 12, 24 ];
+    const ringCounts = [ 0, 8, 16 ];
+
+    // — OrbitControls —
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    function animate(){
+      requestAnimationFrame(animate);
+      time += 0.005;
+
+      // 1) update ray
+      raycaster.setFromCamera(mouse, camera);
+      const origin = raycaster.ray.origin;
+      const dir    = raycaster.ray.direction;
+
+      // build an orthonormal basis (dir, orth1, orth2)
+      // pick a world‐up that isn’t parallel to dir:
+      const up = Math.abs(dir.y)<0.9
+        ? new THREE.Vector3(0,1,0)
+        : new THREE.Vector3(1,0,0);
+      const orth1 = new THREE.Vector3().crossVectors(dir, up).normalize();
+      const orth2 = new THREE.Vector3().crossVectors(dir, orth1).normalize();
+
+      // 2) deform each vertex
+      const pos = sphere.geometry.attributes.position;
+      for(let i=0; i<pos.count; i++){
+        const ix = 3*i, iy = ix+1, iz = ix+2;
+        const ox = basePos[ix], oy = basePos[iy], oz = basePos[iz];
+
+        // a) Perlin‐noise base
+        const n     = noise.noise4d(ox*noiseFreq, oy*noiseFreq, oz*noiseFreq, time);
+        let   r     = radius + n*noiseAmp;
+
+        // b) world‐space point
+        const xW = ox*r, yW = oy*r, zW = oz*r;
+
+        // c) closest point on ray
+        const toV = new THREE.Vector3(xW-origin.x,yW-origin.y,zW-origin.z);
+        let   tProj = toV.dot(dir);
+        tProj = THREE.MathUtils.clamp(tProj,0,influenceDist);
+        const closest = new THREE.Vector3()
+          .copy(dir).multiplyScalar(tProj).add(origin);
+
+        // d) distance to ray‐axis
+        const dAxis = closest.distanceTo(new THREE.Vector3(xW,yW,zW));
+
+        // e) only on front hemisphere (normals toward camera)
+        const viewDot = ox*(-dir.x)+oy*(-dir.y)+oz*(-dir.z);
+        if(viewDot>0){
+          // f) central apex (layer 0)
+          if(dAxis < baseThreshold){
+            const f = Math.pow(1 - dAxis/baseThreshold, falloffPower);
+            r += baseMouseAmp * f;
+          } else {
+            // g) ring layers 1 & 2
+            for(let L=1; L<=2; L++){
+              const inner = baseThreshold * Math.pow(scale, L-1);
+              const outer = baseThreshold * Math.pow(scale, L);
+              if(dAxis >= inner && dAxis < outer){
+                // radial falloff
+                const fRad = 1 - ((dAxis - inner)/(outer-inner));
+                // angular modulation for discrete spikes
+                // project onto the plane to get angle:
+                const local = new THREE.Vector3(xW-origin.x,yW-origin.y,zW-origin.z)
+                  .sub(dir.clone().multiplyScalar(tProj));
+                const ax = local.dot(orth1), ay = local.dot(orth2);
+                const angle = Math.atan2(ay,ax);
+                const spikeFactor = Math.max(Math.cos(angle*ringCounts[L]), 0) ** 4;
+                const amp = baseMouseAmp * Math.pow(strengthDecay, L);
+                r += amp * fRad * spikeFactor;
+                break;
+              }
+            }
+          }
+        }
+
+        // h) write back
+        pos.array[ix] = ox * r;
+        pos.array[iy] = oy * r;
+        pos.array[iz] = oz * r;
+      }
+
+      pos.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+      controls.update();
+      renderer.render(scene,camera);
+    }
+
+    animate();
+
+    // — Resize —
+    window.addEventListener('resize', ()=>{
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth,innerHeight);
+    });
+  </script>
+</body>
+</html>

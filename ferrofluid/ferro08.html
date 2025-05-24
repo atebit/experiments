@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Stable Magnetic Cones via Plane Intersection</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import * as THREE        from './three.module.js';
+    import { SimplexNoise }  from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // — Scene / Camera / Renderer —
+    const scene    = new THREE.Scene();
+    scene.background = new THREE.Color(0xF7F7FB);
+    const camera   = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 5);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // — Lights (six directions + ambient) —
+    [[0,0,5],[0,0,-5],[5,0,0],[-5,0,0],[0,5,0],[0,-5,0]].forEach(([x,y,z]) => {
+      const L = new THREE.DirectionalLight(0xffffff, 0.8);
+      L.position.set(x, y, z);
+      scene.add(L);
+    });
+    scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+    // — Sphere + Backup Positions —
+    const radius = 1, detail = 128;
+    const geometry = new THREE.SphereGeometry(radius, detail, detail);
+    const basePos = Float32Array.from(geometry.attributes.position.array);
+    const material = new THREE.MeshPhysicalMaterial({
+      color: 0x000000,
+      metalness: 0.9,
+      roughness: 0.1,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.0,
+      wireframe: true    // <-- keep the wireframe on
+    });
+    const sphere = new THREE.Mesh(geometry, material);
+    scene.add(sphere);
+
+    // — Noise Setup —
+    const noise     = new SimplexNoise();
+    const noiseFreq = 1.5;
+    const noiseAmp  = 0.15;
+    let   time      = 0;
+
+    // — Mouse + Raycaster + Plane —
+    const raycaster     = new THREE.Raycaster();
+    const mouse         = new THREE.Vector2();
+    const magneticPlane = new THREE.Plane();
+    const magneticPoint = new THREE.Vector3();
+
+    window.addEventListener('mousemove', e => {
+      mouse.x = (e.clientX / innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+    });
+
+    // — Fractal‐Cones Parameters —
+    const levels        = 4;      // number of rings
+    const baseThreshold = 0.2;    // first‐ring radius
+    const scale         = 2.0;    // growth per ring
+    const strengthDecay = 0.6;    // amplitude decay per ring
+    const falloffPower  = 4;      // sharpness of each cone
+    const influenceDist = 5;      // how far out along the ray we look
+
+    // — Orbit Controls —
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    // — Animation Loop —
+    function animate() {
+      requestAnimationFrame(animate);
+      time += 0.005;
+
+      // 1) Build a plane through the sphere’s center, facing the camera
+      const camDir = new THREE.Vector3();
+      camera.getWorldDirection(camDir);
+      magneticPlane.setFromNormalAndCoplanarPoint(camDir, sphere.position);
+
+      // 2) Find the 3D “magnetic point” where the mouse‐ray hits that plane
+      raycaster.setFromCamera(mouse, camera);
+      raycaster.ray.intersectPlane(magneticPlane, magneticPoint);
+
+      // 3) Re‐compute every vertex
+      const posAttr = sphere.geometry.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) {
+        const ix = 3*i, iy = ix+1, iz = ix+2;
+        const ox = basePos[ix], oy = basePos[iy], oz = basePos[iz];
+
+        // — a) Apply Perlin noise —
+        const n     = noise.noise4d(ox*noiseFreq, oy*noiseFreq, oz*noiseFreq, time);
+        let   rBase = radius + n * noiseAmp;
+
+        // — b) If we have a magneticPoint, build fractal cones around it —
+        if (magneticPoint) {
+          // world position of this vertex after noise
+          const xW = ox * rBase, 
+                yW = oy * rBase, 
+                zW = oz * rBase;
+          // distance to the magnetic point
+          const d = magneticPoint.distanceTo(new THREE.Vector3(xW, yW, zW));
+
+          // accumulate ring‐by‐ring
+          for (let lvl = 0; lvl < levels; lvl++) {
+            const thresh = baseThreshold * Math.pow(scale, lvl);
+            const amp    = magneticPoint.length() * Math.pow(strengthDecay, lvl);
+            if (d < thresh) {
+              let f = 1 - (d / thresh);
+              f = Math.pow(f, falloffPower);
+              rBase += amp * f;
+            }
+          }
+        }
+
+        // — c) Write back along the original normal —
+        posAttr.array[ix] = ox * rBase;
+        posAttr.array[iy] = oy * rBase;
+        posAttr.array[iz] = oz * rBase;
+      }
+
+      posAttr.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // — Handle Resize —
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>

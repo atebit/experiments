@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ThreeJS Ferrofluid</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+    #info{
+      width:100%;
+      text-align: center;
+      position:absolute;
+      z-index: 999;
+      color:#fff;
+      font-family: sans-serif;
+      padding:5px;
+      font-size:12px;
+    }
+    a{ color:#fff; }
+  </style>
+</head>
+<body>
+  <div id='info'>
+    ThreeJS Ferrofluid experiment by <a href="https://www.linkedin.com/in/atebit/" target="_blank">@atebit</a>. Excite the fluid by touching it with mouse. Click and drag to orbit.
+  </div>
+  <script type="module">
+    import * as THREE        from './three.module.js';
+    import { SimplexNoise }  from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // — Scene, Camera, Renderer —
+    const scene    = new THREE.Scene();
+    scene.background = new THREE.Color(0x202020);
+    const camera   = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 5);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // — Lights —
+    [[0,0,5],[0,0,-5],[5,0,0],[-5,0,0],[0,5,0],[0,-5,0]]
+      .forEach(p => {
+        const L = new THREE.DirectionalLight(0xffffff, 0.8);
+        L.position.set(...p);
+        scene.add(L);
+      });
+    scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+    // — Sphere + Backup —
+    const radius = 1, detail = 128;
+    const geo    = new THREE.SphereGeometry(radius, detail, detail);
+    const basePos= Float32Array.from(geo.attributes.position.array);
+    const mat    = new THREE.MeshPhysicalMaterial({
+      color:0x000000, metalness:0.9, roughness:0.1,
+      clearcoat:1, clearcoatRoughness:0,
+      // wireframe:true
+    });
+    const sphere = new THREE.Mesh(geo, mat);
+    scene.add(sphere);
+
+    // Prepare array to store eased radii per vertex
+    const vertexCount = geo.attributes.position.count;
+    const prevR = new Float32Array(vertexCount).fill(radius);
+
+    // — Noise —
+    const noise     = new SimplexNoise();
+    const noiseFreq = 1.5, noiseAmp = 0.15;
+    let   time      = 0;
+
+    // — Mouse + Raycaster —
+    const raycaster = new THREE.Raycaster();
+    const mouse     = new THREE.Vector2();
+    window.addEventListener('mousemove', e => {
+      mouse.x = (e.clientX/innerWidth)*2 - 1;
+      mouse.y = -(e.clientY/innerHeight)*2 + 1;
+    });
+
+    // — Params —
+    const baseThreshold = 0.8;
+    const scale         = 2.5;
+    const strengthDecay = 0.6;
+    const falloffPower  = 2;
+    const influenceDist = 2000;
+    const baseAmp       = 0.8;
+    const ringCounts    = [0, 8, 16];
+
+    // — Thresholds —
+    const primaryThreshold   = baseThreshold * scale;
+    const secondaryThreshold = primaryThreshold * scale;
+    const tertiaryThreshold  = secondaryThreshold * scale;
+
+    // — Prepare orbit points & invisible debug dots —
+    const orbitPoints = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    const dotColors    = [0xff0000, 0x00ff00, 0x0000ff];
+    orbitPoints.forEach((pt, i) => {
+      const dotGeom = new THREE.SphereGeometry(0.03, 8, 8);
+      const dotMat  = new THREE.MeshBasicMaterial({ color: dotColors[i] });
+      const dotMesh = new THREE.Mesh(dotGeom, dotMat);
+      dotMesh.name        = `magDot${i}`;
+      dotMesh.visible     = false;
+      scene.add(dotMesh);
+    });
+
+    // — OrbitControls —
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    function animate(){
+      requestAnimationFrame(animate);
+      time += 0.005;
+
+      // — Check mouse intersection —
+      raycaster.setFromCamera(mouse, camera);
+      const intersects    = raycaster.intersectObject(sphere);
+      const mouseOnSphere = intersects.length > 0;
+
+      // — Update orbit points and dots —
+      orbitPoints.forEach((pt, i) => {
+        const radiusVar = 3 + Math.sin(time * (0.3 + i*0.1)) * 0.5;
+        const theta     = time * (0.7 + i*0.2) + noise.noise3d(time, i, 0) * 0.5;
+        const phi       = time * (0.5 + i*0.15) + noise.noise3d(i, time, 0) * 0.3;
+        pt.set(
+          radiusVar * Math.cos(theta) * Math.sin(phi),
+          radiusVar * Math.sin(theta) * Math.sin(phi),
+          radiusVar * Math.cos(phi)
+        );
+        scene.getObjectByName(`magDot${i}`).position.copy(pt);
+      });
+
+      // — Deform vertices with easing —
+      const pos = sphere.geometry.attributes.position;
+      for(let idx = 0; idx < vertexCount; idx++){
+        const ix = 3*idx, iy = ix+1, iz = ix+2;
+        const ox = basePos[ix], oy = basePos[iy], oz = basePos[iz];
+
+        // compute noise-based target radius
+        const n       = noise.noise4d(ox*noiseFreq, oy*noiseFreq, oz*noiseFreq, time);
+        let   target  = radius + n * noiseAmp;
+
+        // world-space vertex
+        const xW = ox * target, yW = oy * target, zW = oz * target;
+
+        if(mouseOnSphere){
+          // accumulate pull into target radius
+          orbitPoints.forEach(pt => {
+            const d = Math.hypot(xW-pt.x, yW-pt.y, zW-pt.z);
+            if(d < primaryThreshold) {
+              const f = Math.pow(1 - d/primaryThreshold, falloffPower);
+              target += baseAmp * f;
+            } else if(d < secondaryThreshold) {
+              const inner = primaryThreshold, outer = secondaryThreshold;
+              const fRad  = 1 - ((d-inner)/(outer-inner));
+              const dirVec = pt.clone().normalize();
+              const local  = new THREE.Vector3(xW-pt.x, yW-pt.y, zW-pt.z)
+                .sub(dirVec.clone().multiplyScalar(
+                  xW*dirVec.x + yW*dirVec.y + zW*dirVec.z
+                ));
+              const orthA = new THREE.Vector3().crossVectors(dirVec, new THREE.Vector3(0,1,0)).normalize();
+              const orthB = new THREE.Vector3().crossVectors(dirVec, orthA).normalize();
+              const angle = Math.atan2(local.dot(orthB), local.dot(orthA));
+              const spikeF = Math.max(Math.cos(angle * ringCounts[1]),0) ** 4;
+              target += baseAmp * Math.pow(strengthDecay,1) * fRad * spikeF;
+            } else if(d < tertiaryThreshold) {
+              const inner = secondaryThreshold, outer = tertiaryThreshold;
+              const fRad  = 1 - ((d-inner)/(outer-inner));
+              const dirVec = pt.clone().normalize();
+              const local  = new THREE.Vector3(xW-pt.x, yW-pt.y, zW-pt.z)
+                .sub(dirVec.clone().multiplyScalar(
+                  xW*dirVec.x + yW*dirVec.y + zW*dirVec.z
+                ));
+              const orthA = new THREE.Vector3().crossVectors(dirVec, new THREE.Vector3(0,1,0)).normalize();
+              const orthB = new THREE.Vector3().crossVectors(dirVec, orthA).normalize();
+              const angle = Math.atan2(local.dot(orthB), local.dot(orthA));
+              const spikeF = Math.max(Math.cos(angle * ringCounts[2]),0) ** 4;
+              target += baseAmp * Math.pow(strengthDecay,2) * fRad * spikeF;
+            }
+          });
+        }
+
+        // ease previous radius toward target
+        const eased = THREE.MathUtils.lerp(prevR[idx], target, 0.1);
+        prevR[idx] = eased;
+
+        // write back along normal
+        pos.array[ix] = ox * eased;
+        pos.array[iy] = oy * eased;
+        pos.array[iz] = oz * eased;
+      }
+
+      pos.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // — Resize —
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>

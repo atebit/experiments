@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ferrofluid-Style Tidal Pull</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from './three.module.js';
+    import { SimplexNoise } from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // — Scene, Camera, Renderer —
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xF7F7FB);
+    const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 5);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // — Lights (six directions) —
+    [[0,0,5],[0,0,-5],[5,0,0],[-5,0,0],[0,5,0],[0,-5,0]]
+      .forEach(([x,y,z])=>{
+        const L = new THREE.DirectionalLight(0xffffff, 0.8);
+        L.position.set(x,y,z);
+        scene.add(L);
+      });
+    scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+    // — Sphere + Base Positions —
+    const radius = 1, detail = 128;
+    const geo = new THREE.SphereGeometry(radius, detail, detail);
+    const basePos = Float32Array.from(geo.attributes.position.array);
+    const mat = new THREE.MeshPhysicalMaterial({
+      color: 0x000000, metalness: 0.9, roughness: 0.1,
+      clearcoat: 1.0, clearcoatRoughness: 0.0
+    });
+    mat.wireframe = true;
+    const sphere = new THREE.Mesh(geo, mat);
+    scene.add(sphere);
+
+    // — Noise setup —
+    const noise     = new SimplexNoise();
+    const noiseFreq = 1.5;
+    const noiseAmp  = 0.15;
+    let t           = 0;
+
+    // — Mouse & Raycaster & Plane at z=0 —
+    const raycaster = new THREE.Raycaster();
+    const mouse     = new THREE.Vector2();
+    const plane     = new THREE.Plane(new THREE.Vector3(0,0,1), 0);
+    const planeIntersect = new THREE.Vector3();
+    window.addEventListener('mousemove', e => {
+      mouse.x = (e.clientX / innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+    });
+
+    // — Pull parameters —
+    const mouseAmp       = 1.5;   // peak height
+    const mouseThreshold = 0.4;   // cone radius
+    const falloffPower   = 4;     // sharpness
+    const influenceDist  = 5;     // max distance for any pull
+
+    // — Controls —
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    // — Animation Loop —
+    function animate() {
+      requestAnimationFrame(animate);
+      t += 0.005;
+
+      // 1) get a 3D point on z=0 plane under the mouse ray
+      raycaster.setFromCamera(mouse, camera);
+      const hitPlane = raycaster.ray.intersectPlane(plane, planeIntersect);
+      // global strength [0‒1] based on how close that point is to the sphere center
+      const globalFactor = hitPlane
+        ? 1 - Math.min(planeIntersect.length() / influenceDist, 1)
+        : 0;
+
+      // 2) rebuild vertices: noise + tidal cone * globalFactor
+      const posAttr = sphere.geometry.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) {
+        const ix = 3*i, iy = ix+1, iz = ix+2;
+        const ox = basePos[ix], oy = basePos[iy], oz = basePos[iz];
+
+        // — noise-only radius
+        const n       = noise.noise4d(ox*noiseFreq, oy*noiseFreq, oz*noiseFreq, t);
+        let   rNoise  = radius + n * noiseAmp;
+
+        if (hitPlane && globalFactor > 0) {
+          // compute world pos for this vertex
+          const xW = ox * rNoise, yW = oy * rNoise, zW = oz * rNoise;
+          // distance to the mouse-plane point
+          const d = Math.hypot(
+            xW - planeIntersect.x,
+            yW - planeIntersect.y,
+            zW - planeIntersect.z
+          );
+          if (d < mouseThreshold) {
+            // build a cone falloff
+            let f = 1 - (d / mouseThreshold);
+            f = Math.pow(f, falloffPower);
+            rNoise += mouseAmp * f * globalFactor;
+          }
+        }
+
+        // write final position along normal
+        posAttr.array[ix] = ox * rNoise;
+        posAttr.array[iy] = oy * rNoise;
+        posAttr.array[iz] = oz * rNoise;
+      }
+      posAttr.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // — Responsiveness —
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>

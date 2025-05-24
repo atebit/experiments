@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Undulating Glossy Sphere with Front Light</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from './three.module.js';
+    import { SimplexNoise } from './SimplexNoise.js';
+    import { OrbitControls } from './OrbitControls.js';
+
+    // ——— Scene & Background ———
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xF7F7FB);
+
+    // ——— Camera ———
+    const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 5);
+
+    // ——— Renderer ———
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // ——— Lights ———
+    // Back/top‐left light (as before)
+    const backLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    backLight.position.set(-1, 1, 2);
+    scene.add(backLight);
+
+    // New front‐facing light to catch the sphere’s “face”
+    const frontLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    frontLight.position.set(0, 0, 5); // same direction as camera
+    scene.add(frontLight);
+
+    // Subtle fill so shadows aren’t pitch black
+    const ambient = new THREE.AmbientLight(0xffffff, 0.2);
+    scene.add(ambient);
+
+    // ——— Glossy Sphere + Save Base Positions ———
+    const radius = 1;
+    const detail = 128;
+    const sphereGeo = new THREE.SphereGeometry(radius, detail, detail);
+    const originalPos = Float32Array.from(sphereGeo.attributes.position.array);
+
+    const sphereMat = new THREE.MeshPhysicalMaterial({
+      color: 0x000000,
+      metalness: 0.9,
+      roughness: 0.1,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.0
+    });
+    const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+    scene.add(sphere);
+
+    // ——— Noise & Controls ———
+    const noise = new SimplexNoise();
+    const noiseFreq = 1.5;
+    const noiseAmp = 0.15;
+    let tOffset = 0;
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    // ——— Animation Loop ———
+    function animate() {
+      requestAnimationFrame(animate);
+
+      tOffset += 0.005;
+      const pos = sphere.geometry.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const ix = i * 3, iy = ix + 1, iz = ix + 2;
+        const ox = originalPos[ix], oy = originalPos[iy], oz = originalPos[iz];
+        const n = noise.noise4d(ox * noiseFreq, oy * noiseFreq, oz * noiseFreq, tOffset);
+        const r = radius + n * noiseAmp;
+        const len = Math.hypot(ox, oy, oz);
+        pos.array[ix] = (ox / len) * r;
+        pos.array[iy] = (oy / len) * r;
+        pos.array[iz] = (oz / len) * r;
+      }
+      pos.needsUpdate = true;
+      sphere.geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // ——— Handle Resize ———
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>
